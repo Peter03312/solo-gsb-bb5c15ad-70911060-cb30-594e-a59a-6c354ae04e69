@@ -8,6 +8,8 @@ const state = {
   versions: [],
   detail: null,
   editingCueId: null,
+  handover: null, // 交接预览：{ draftVersion, oldVersion, items[] }
+  handoverPick: new Set(), // 勾选要延续的 cueRef
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -127,6 +129,8 @@ async function loadDraft() {
   state.draft = await api('GET', '/api/draft');
   state.positions = state.draft.positions;
   renderDraft();
+  // 自动刷新交接资格（自己刚改过草稿也需要重新核对）；失败时保留手动预览入口
+  loadHandoverPreview().catch(() => {});
 }
 
 async function loadDraftFresh() {
@@ -195,6 +199,9 @@ function renderDraft() {
   }).join('') || '<div class="muted">暂无前置关系。</div>';
 
   $('#publish-result').innerHTML = '';
+
+  // 草稿变化后同步刷新交接区过期提示（预览数据异步返回后会再次完整渲染）
+  renderHandover();
 }
 
 function minText(min) {
@@ -309,25 +316,140 @@ $('#dep-list').addEventListener('click', async (ev) => {
   }
 });
 
+// ---------- 发布前：旧执行版完成项交接预览 ----------
+
+async function loadHandoverPreview() {
+  const data = await api('GET', '/api/publish/handover-preview');
+  state.handover = data;
+  // 默认勾选当前仍合格的项；保留之前已存在的勾选（仅在其仍合格时）
+  const eligibleRefs = new Set(data.items.filter((it) => it.eligible).map((it) => it.cueRef));
+  state.handoverPick = new Set([...state.handoverPick].filter((r) => eligibleRefs.has(r)));
+  renderHandover();
+  return data;
+}
+
+function handoverStale() {
+  const h = state.handover;
+  return !!h && h.draftVersion !== state.draft.version;
+}
+
+function renderHandover() {
+  const summary = $('#handover-summary');
+  const staleBox = $('#handover-stale');
+  const list = $('#handover-list');
+  const h = state.handover;
+
+  if (!h) {
+    summary.textContent = '可先预览旧执行版中已完成项的交接资格，并勾选要带入新版的项。';
+    staleBox.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+  if (!h.oldVersion) {
+    summary.textContent = '当前没有旧执行版（首次发布）：交接列表为空，将按原流程发布。';
+    staleBox.hidden = true;
+    list.innerHTML = '<div class="muted" style="margin-top:6px">无旧版，暂无可交接的登记。</div>';
+    return;
+  }
+
+  const eligibleCount = h.items.filter((it) => it.eligible).length;
+  summary.innerHTML =
+    `旧执行版：<strong>第 ${esc(String(h.oldVersion.versionNo))} 版</strong> ${esc(h.oldVersion.note)}`
+    + `（预览基于草稿 v${h.draftVersion}）· ${eligibleCount} 项可选延续`;
+
+  const stale = handoverStale();
+  staleBox.hidden = !stale;
+  staleBox.textContent = stale
+    ? `草稿已被修改（当前 v${state.draft.version}，预览基于 v${h.draftVersion}），请重新预览后再选择与发布。`
+    : '';
+
+  const rows = h.items.map((it) => {
+    const checked = state.handoverPick.has(it.cueRef) && it.eligible;
+    const reasons = it.eligible ? '' :
+      `<ul class="reason-list">${it.reasons.map((r) => `<li>${esc(r.message)}</li>`).join('')}</ul>`;
+    return `<tr${it.eligible ? '' : ' class="muted"'}>
+      <td><input type="checkbox" data-act="pick-carry" data-ref="${it.cueRef}" ${checked ? 'checked' : ''} ${it.eligible ? '' : 'disabled'} /></td>
+      <td><strong>${esc(it.code)}</strong></td>
+      <td>${esc(it.title)}</td>
+      <td>${esc(it.position)}</td>
+      <td class="mono">${it.actualStartText ?? '—'} - ${it.actualEndText ?? '—'}</td>
+      <td>${it.eligible
+        ? '<span class="pick-tag ok">可延续</span>'
+        : `<span class="pick-tag no">不可延续</span>${reasons}`}</td>
+      <td class="muted mono">v${it.rowVersion ?? '—'}</td>
+    </tr>`;
+  }).join('');
+  list.innerHTML = `<div class="table-wrap handover-table"><table>
+    <thead><tr><th>延续</th><th>编号</th><th>说明</th><th>岗位</th><th>旧版实际（开始-完成）</th><th>交接资格 / 不合格原因</th><th>行版本</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="muted">仅实际开始与实际完成会带入新版（预计结束不带入）；未勾选项保持空登记。资格要求：编号、说明、岗位、计划开始、时长与前置集合完全一致，且旧登记同时有实际开始和实际完成。</div>`;
+}
+
+$('#handover-preview-btn').addEventListener('click', async () => {
+  try {
+    const data = await loadHandoverPreview();
+    alertBar('ok', data.oldVersion
+      ? `已预览旧执行版（第 ${data.oldVersion.versionNo} 版）交接资格。`
+      : '当前没有旧执行版，交接列表为空。');
+  } catch (e) { alertBar('error', errorToHtml(e)); }
+});
+
+$('#handover-list').addEventListener('change', (ev) => {
+  const box = ev.target.closest('input[data-act="pick-carry"]');
+  if (!box) return;
+  const ref = Number(box.dataset.ref);
+  if (box.checked) {
+    if (handoverStale()) return; // 过期时不允许新增勾选，只能取消
+    state.handoverPick.add(ref);
+  } else {
+    state.handoverPick.delete(ref);
+  }
+});
+
 $('#publish-btn').addEventListener('click', async () => {
   if (!state.draft) return;
   if (!state.draft.validation.ok) {
     alertBar('error', '当前草稿存在冲突项，请先根据上方红色提示修正后再发布。');
     return;
   }
-  if (!confirm('确认发布只读联排版本？发布后岗位将依据新版本登记。')) return;
+  const stale = handoverStale();
+  const picks = state.handover && !stale
+    ? state.handover.items.filter((it) => it.eligible && state.handoverPick.has(it.cueRef))
+    : [];
+  // 预览已过期且仍有勾选：必须重新预览后再发布（无勾选时按原行为发布即可）
+  if (stale && state.handoverPick.size > 0) {
+    alertBar('error', '交接预览已过期（草稿已变化），请点击「预览交接资格」重新预览并选择；若不延续旧登记，可刷新后取消全部勾选再发布。');
+    return;
+  }
+  const carryMsg = picks.length
+    ? `并延续旧版 ${picks.length} 项已完成登记（实际开始/实际完成）`
+    : '不延续旧版登记';
+  if (!confirm(`确认发布只读联排版本（${carryMsg}）？发布后岗位将依据新版本登记。`)) return;
   try {
-    const result = await api('POST', '/api/publish', {
+    const payload = {
       version: state.draft.version,
       note: $('#publish-note').value.trim(),
-    });
+    };
+    if (state.handover?.oldVersion && picks.length) {
+      payload.handover = {
+        oldVersionId: state.handover.oldVersion.id,
+        items: picks.map((it) => ({ cueRef: it.cueRef, rowVersion: it.rowVersion })),
+      };
+    }
+    const result = await api('POST', '/api/publish', payload);
     $('#publish-note').value = '';
-    alertBar('ok', `🎉 已发布联排第 ${result.versionNo} 版（版本号校验通过），草稿版本已推进，请刷新视图`);
+    alertBar('ok', `🎉 已发布联排第 ${result.versionNo} 版（版本号校验通过），延续登记 ${result.carriedCount} 项，草稿版本已推进，请刷新视图`);
+    state.handoverPick = new Set();
     state.draft = await loadDraftFresh();
     renderDraft();
+    loadHandoverPreview().catch((e) => alertBar('error', errorToHtml(e)));
   } catch (e) {
     if (e.status === 422) alertBar('error', errorToHtml(e), 12000);
-    else alertBar('error', errorToHtml(e));
+    else if (e.data?.previewRequired) {
+      alertBar('error', errorToHtml(e) + '<div class="muted">请重新点击「预览交接资格」后再选择发布。</div>', 10000);
+      state.handover = null;
+      renderHandover();
+    } else alertBar('error', errorToHtml(e));
     // 发布失败也拉取最新草稿（可能版本已变化）
     loadDraft().then(renderDraft).catch(() => {});
   }
@@ -350,6 +472,11 @@ function statusBadge(s) {
   if (s === 'DONE') return '<span class="badge done">已完成</span>';
   if (s === 'RUNNING') return '<span class="badge running">已开始</span>';
   return '<span class="badge pending">未开始</span>';
+}
+
+function carryTag(c) {
+  return c.carrySourceVersionNo !== null && c.carrySourceVersionNo !== undefined
+    ? `<div class="carry-tag">交接自第${c.carrySourceVersionNo}版</div>` : '';
 }
 
 function renderConflicts(conflicts) {
@@ -398,7 +525,7 @@ function renderLive() {
       <td class="mono">${c.plannedStartText} - ${minText(c.plannedStart + c.duration)}</td>
       <td class="mono">${c.schedStartText}${delayed}</td>
       <td class="mono">${c.schedEndText}</td>
-      <td>${statusBadge(c.status)}<div class="muted">v${c.rowVer}</div></td>
+      <td>${statusBadge(c.status)}<div class="muted">v${c.rowVer}</div>${carryTag(c)}</td>
       <td class="mono">${c.actualStartText ?? '—'}</td>
       <td class="mono">${c.actualEndText ?? '—'}</td>
       <td class="mono">${c.estimatedEndText ?? '—'}</td>
@@ -717,7 +844,7 @@ function renderDetail() {
         <td class="mono">${c.plannedStartText} - ${minText(c.plannedStart + c.duration)}</td>
         <td class="mono">${c.schedStartText}${c.delayed ? '<div class="delayed">顺延</div>' : ''}</td>
         <td class="mono">${c.schedEndText}</td>
-        <td>${statusBadge(c.status)}</td>
+        <td>${statusBadge(c.status)}${carryTag(c)}</td>
         <td class="mono">${c.actualStartText ?? '—'}</td>
         <td class="mono">${c.actualEndText ?? '—'}</td>
         <td class="mono">${c.estimatedEndText ?? '—'}</td>

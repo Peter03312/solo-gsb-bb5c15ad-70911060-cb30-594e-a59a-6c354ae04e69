@@ -139,11 +139,19 @@ function versionPayload(versionRow) {
       actualStart: r.actual_start, actualEnd: r.actual_end,
       estimatedEnd: r.estimated_end, rowVer: r.row_ver,
       updatedBy: r.updated_by, updatedAt: r.updated_at,
+      carrySourceVersion: r.carry_source_version, carrySourceCueRef: r.carry_source_cue_ref,
     });
   }
 
   const live = computeLive(cues, deps, regMap);
   const latestId = (db.prepare('SELECT MAX(version_no) AS m FROM rehearsal_versions').get().m);
+
+  // 交接来源版本号（用于页面标明「交接自第 N 版」）
+  const sourceVersionNos = new Map();
+  for (const sourceId of new Set(regRows.map((r) => r.carry_source_version).filter((v) => v !== null))) {
+    const sv = db.prepare('SELECT version_no FROM rehearsal_versions WHERE id = ?').get(sourceId);
+    if (sv) sourceVersionNos.set(sourceId, sv.version_no);
+  }
 
   const corrRows = db.prepare(
     `SELECT cue_ref, field, old_value, new_value, reason, cascaded, corrected_by, corrected_at
@@ -178,6 +186,8 @@ function versionPayload(versionRow) {
       actualStartText: minToTime(c.actualStart),
       actualEndText: minToTime(c.actualEnd),
       estimatedEndText: minToTime(c.estimatedEnd),
+      carrySourceVersionNo: c.carrySourceVersion !== null
+        ? (sourceVersionNos.get(c.carrySourceVersion) ?? null) : null,
       corrections: corrMap.get(c.id) || [],
     })),
     conflicts: live.conflicts,
@@ -299,12 +309,154 @@ app.delete('/api/draft/deps/:id', requireSM, (req, res, next) => {
 
 // ---------- 舞监：发布只读联排版本 ----------
 
+/**
+ * 交接资格判定：草稿提示项与旧执行版同一提示项引用（cue_ref）在
+ * 编号、说明、岗位、计划开始、时长与前置集合上完全一致，且旧登记同时有
+ * 实际开始与实际完成，才可选（eligible）。
+ *
+ * @param cue     草稿提示项 {id, code, title, position, plannedStart, duration}
+ * @param oldCue  旧版 published_cues 行（字段名为下划线形式）
+ * @param reg     旧版 registrations 行（字段名为下划线形式），可为 null
+ * @param preds   该提示项在草稿中的前置 id 集合
+ * @param oldPreds 该提示项在旧版中的前置 cue_ref 集合
+ * @param draftExists 草稿中是否仍存在同引用提示项
+ */
+function handoverEligibility(cue, oldCue, reg, preds, oldPreds, draftExists) {
+  const reasons = [];
+  if (!draftExists || !cue) {
+    reasons.push({ code: 'NOT_IN_DRAFT', message: '该提示项已从草稿删除，无法带入新版' });
+  } else {
+    if (cue.code !== oldCue.code) reasons.push({ code: 'CODE_CHANGED', message: `编号变化：${oldCue.code} → ${cue.code}` });
+    if ((cue.title || '') !== (oldCue.title || '')) reasons.push({ code: 'TITLE_CHANGED', message: '说明已修改' });
+    if (cue.position !== oldCue.position) reasons.push({ code: 'POSITION_CHANGED', message: `岗位变化：${oldCue.position} → ${cue.position}` });
+    if (cue.plannedStart !== oldCue.planned_start) reasons.push({ code: 'START_CHANGED', message: `计划开始变化：${minToTime(oldCue.planned_start)} → ${minToTime(cue.plannedStart)}` });
+    if (cue.duration !== oldCue.duration) reasons.push({ code: 'DURATION_CHANGED', message: `时长变化：${oldCue.duration} → ${cue.duration} 分钟` });
+    const sameDeps = preds.size === oldPreds.size && [...preds].every((x) => oldPreds.has(x));
+    if (!sameDeps) reasons.push({ code: 'DEPS_CHANGED', message: '前置集合已变化' });
+  }
+  if (!reg) {
+    reasons.push({ code: 'NO_REGISTRATION', message: '旧版缺少登记记录' });
+  } else {
+    if (reg.actual_start === null) reasons.push({ code: 'NO_ACTUAL_START', message: '旧登记缺少实际开始' });
+    if (reg.actual_end === null) reasons.push({ code: 'NO_ACTUAL_END', message: '旧登记缺少实际完成（尚未完成）' });
+  }
+  return { eligible: reasons.length === 0, reasons };
+}
+
+/**
+ * 汇总某次预览所见的交接状态。oldVersionRow 为 null 时 items 为空。
+ * 预览与发布共用同一套判定，发布时以 rowVer 再次核对所选登记行版本。
+ */
+function buildHandoverPreview(draftCues, draftDeps, oldVersionRow) {
+  const draftVersion = Number(getMeta('draft_version', '0'));
+  if (!oldVersionRow) {
+    return { draftVersion, oldVersion: null, items: [] };
+  }
+
+  const oldCueRows = db.prepare(
+    'SELECT cue_ref, code, title, position, planned_start, duration FROM published_cues WHERE version_id = ?'
+  ).all(oldVersionRow.id);
+  const oldRegRows = db.prepare(
+    'SELECT cue_ref, actual_start, actual_end, estimated_end, row_ver, updated_at FROM registrations WHERE version_id = ?'
+  ).all(oldVersionRow.id);
+  const oldDepRows = db.prepare(
+    'SELECT from_ref, to_ref FROM published_deps WHERE version_id = ?'
+  ).all(oldVersionRow.id);
+
+  const cueById = new Map(draftCues.map((c) => [c.id, c]));
+  const draftPreds = new Map(draftCues.map((c) => [c.id, new Set()]));
+  for (const d of draftDeps) {
+    if (draftPreds.has(d.to)) draftPreds.get(d.to).add(d.from);
+  }
+  const oldCueByRef = new Map(oldCueRows.map((c) => [c.cue_ref, c]));
+  const oldRegByRef = new Map(oldRegRows.map((r) => [r.cue_ref, r]));
+  const oldPreds = new Map(oldCueRows.map((c) => [c.cue_ref, new Set()]));
+  for (const d of oldDepRows) {
+    if (oldPreds.has(d.to_ref)) oldPreds.get(d.to_ref).add(d.from_ref);
+  }
+
+  const items = oldCueRows.map((oldCue) => {
+    const cue = cueById.get(oldCue.cue_ref) || null;
+    const reg = oldRegByRef.get(oldCue.cue_ref) || null;
+    const { eligible, reasons } = handoverEligibility(
+      cue, oldCue, reg,
+      cue ? draftPreds.get(cue.id) : new Set(),
+      oldPreds.get(oldCue.cue_ref) || new Set(),
+      cue !== null
+    );
+    return {
+      cueRef: oldCue.cue_ref,
+      code: oldCue.code,
+      title: oldCue.title,
+      position: oldCue.position,
+      oldPlannedStartText: minToTime(oldCue.planned_start),
+      oldDuration: oldCue.duration,
+      actualStartText: reg ? minToTime(reg.actual_start) : null,
+      actualEndText: reg ? minToTime(reg.actual_end) : null,
+      rowVersion: reg ? reg.row_ver : null,
+      eligible,
+      reasons,
+    };
+  }).sort((a, b) => {
+    const ca = oldCueByRef.get(a.cueRef), cb = oldCueByRef.get(b.cueRef);
+    return ca.planned_start - cb.planned_start || a.cueRef - b.cueRef;
+  });
+
+  return {
+    draftVersion,
+    oldVersion: {
+      id: oldVersionRow.id, versionNo: oldVersionRow.version_no,
+      note: oldVersionRow.note, createdAt: oldVersionRow.created_at,
+    },
+    items,
+  };
+}
+
+function currentVersionRow() {
+  return db.prepare('SELECT * FROM rehearsal_versions ORDER BY version_no DESC LIMIT 1').get() || null;
+}
+
+app.get('/api/publish/handover-preview', requireSM, (req, res, next) => {
+  try {
+    const cues = loadDraftCues();
+    const deps = loadDraftDeps();
+    res.json(buildHandoverPreview(cues, deps, currentVersionRow()));
+  } catch (e) { next(e); }
+});
+
 app.post('/api/publish', requireSM, (req, res, next) => {
   try {
     const submitted = req.body.version;
     const cues = loadDraftCues();
     const deps = loadDraftDeps();
     const validation = validatePlan(cues, deps);
+
+    // 交接选择为可选：未传时维持原发布行为（所有行空登记）。
+    // 传入即要求 { oldVersionId, items: [{cueRef, rowVersion}] }，
+    // 实际资格与行版本在事务内重新核对，任一变化整体拒绝。
+    let handover = null;
+    if (req.body.handover !== undefined && req.body.handover !== null) {
+      const h = req.body.handover;
+      if (typeof h !== 'object' || Array.isArray(h)) {
+        throw new ApiError(400, 'BAD_INPUT', '交接选择格式无效');
+      }
+      const oldVersionId = Number(h.oldVersionId);
+      if (!Number.isInteger(oldVersionId)) throw new ApiError(400, 'BAD_INPUT', '交接选择缺少旧执行版版本 id');
+      const rawItems = h.items;
+      if (!Array.isArray(rawItems)) throw new ApiError(400, 'BAD_INPUT', '交接选择 items 必须为数组');
+      const seen = new Set();
+      const items = rawItems.map((it) => {
+        const cueRef = Number(it?.cueRef);
+        const rowVersion = Number(it?.rowVersion);
+        if (!Number.isInteger(cueRef) || !Number.isInteger(rowVersion)) {
+          throw new ApiError(400, 'BAD_INPUT', '交接选择中的 cueRef/rowVersion 必须为整数');
+        }
+        if (seen.has(cueRef)) throw new ApiError(400, 'BAD_INPUT', `交接选择中提示项引用 ${cueRef} 重复`);
+        seen.add(cueRef);
+        return { cueRef, rowVersion };
+      });
+      handover = { oldVersionId, items };
+    }
 
     const result = db.transaction(() => {
       const current = Number(getMeta('draft_version', '0'));
@@ -313,6 +465,44 @@ app.post('/api/publish', requireSM, (req, res, next) => {
           `草稿已被他人修改：当前版本号为 ${current}，提交基于 ${submitted ?? '空'}，请刷新后重试`,
           { currentVersion: current, submittedVersion: submitted ?? null });
       }
+
+      // 发布前重新核对旧执行版与所选登记行：旧版变化、资格失效、行版本过期均整体拒绝
+      let carryByRef = new Map();
+      let carryVersionId = null;
+      let carryVersionNo = null;
+      if (handover) {
+        const oldRow = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(handover.oldVersionId);
+        const latest = db.prepare(
+          'SELECT id, version_no FROM rehearsal_versions ORDER BY version_no DESC LIMIT 1'
+        ).get();
+        if (!oldRow || !latest || latest.id !== oldRow.id) {
+          throw new ApiError(409, 'HANDOVER_STALE',
+            '交接依据的旧执行版已变化或不再是当前执行版本，请重新预览后再发布',
+            { previewRequired: true });
+        }
+        const preview = buildHandoverPreview(cues, deps, oldRow);
+        const previewByRef = new Map(preview.items.map((it) => [it.cueRef, it]));
+        const regRows = db.prepare('SELECT * FROM registrations WHERE version_id = ?').all(oldRow.id);
+        const regByRef = new Map(regRows.map((r) => [r.cue_ref, r]));
+        for (const sel of handover.items) {
+          const item = previewByRef.get(sel.cueRef);
+          const reg = regByRef.get(sel.cueRef);
+          if (!item || !item.eligible) {
+            throw new ApiError(409, 'HANDOVER_STALE',
+              `提示项引用 ${sel.cueRef} 的交接资格已失效，请重新预览并选择后再发布`,
+              { cueRef: sel.cueRef, previewRequired: true });
+          }
+          if (!reg || reg.row_ver !== sel.rowVersion) {
+            throw new ApiError(409, 'HANDOVER_STALE',
+              `「${item.code}」的旧登记行版本已变化（预览时为 v${sel.rowVersion}，当前为 v${reg ? reg.row_ver : '不存在'}），请重新预览后再发布`,
+              { cueRef: sel.cueRef, currentRowVersion: reg ? reg.row_ver : null, previewRequired: true });
+          }
+          carryByRef.set(sel.cueRef, reg);
+        }
+        carryVersionId = oldRow.id;
+        carryVersionNo = oldRow.version_no;
+      }
+
       if (!validation.ok) {
         throw new ApiError(422, 'PUBLISH_CONFLICT', '存在冲突项，无法发布联排版本', { errors: validation.errors });
       }
@@ -336,13 +526,37 @@ app.post('/api/publish', requireSM, (req, res, next) => {
       for (const d of deps) insDep.run(versionId, d.from, d.to);
       for (const c of cues) insReg.run(versionId, c.id, c.position);
 
+      // 仅把所选项的实际开始、实际完成带入新版；未选项保持空登记（预计结束不带入）
+      if (carryByRef.size) {
+        const stamp = new Date().toLocaleString('sv-SE'); // YYYY-MM-DD HH:MM:SS
+        const carryUpd = db.prepare(
+          `UPDATE registrations
+             SET actual_start = @actual_start, actual_end = @actual_end,
+                 row_ver = row_ver + 1, updated_by = @updated_by, updated_at = @updated_at,
+                 carry_source_version = @carry_source_version, carry_source_cue_ref = @carry_source_cue_ref
+           WHERE version_id = @version_id AND cue_ref = @cue_ref`
+        );
+        for (const [cueRef, reg] of carryByRef) {
+          carryUpd.run({
+            actual_start: reg.actual_start,
+            actual_end: reg.actual_end,
+            updated_by: `交接自第${carryVersionNo}版`,
+            updated_at: stamp,
+            carry_source_version: carryVersionId,
+            carry_source_cue_ref: cueRef,
+            version_id: versionId,
+            cue_ref: cueRef,
+          });
+        }
+      }
+
       const v2 = current + 1; // 发布同时推进草稿版本号，过期页面必须刷新
       setMeta('draft_version', v2);
-      return versionId;
+      return { versionId, carriedCount: carryByRef.size };
     })();
 
-    const row = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(result);
-    res.status(201).json(versionPayload(row));
+    const row = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(result.versionId);
+    res.status(201).json({ ...versionPayload(row), carriedCount: result.carriedCount });
   } catch (e) { next(e); }
 });
 

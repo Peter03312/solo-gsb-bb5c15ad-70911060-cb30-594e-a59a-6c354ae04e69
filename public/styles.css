@@ -81,6 +81,19 @@ tr:hover td { background: #fafbfd; }
 .publish-row { display: flex; gap: 10px; }
 .publish-row input { flex: 1; }
 .publish-ok { margin-top: 12px; padding: 10px 14px; background: #e9f8ef; border: 1px solid #b6e2c6; border-radius: 8px; color: #1d7a43; font-size: 13px; }
+
+/* 发布前交接预览 */
+.handover-box { border: 1px solid #d3d9e2; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; background: #fafbfd; }
+.handover-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.handover-stale { margin-top: 8px; background: #fdecea; border: 1px solid #f3b6ae; color: #a33224; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+.handover-table { margin-top: 8px; }
+.handover-table th, .handover-table td { font-size: 12px; padding: 6px 8px; }
+.pick-tag { display: inline-block; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+.pick-tag.ok { background: #e2f5e9; color: #1d7a43; }
+.pick-tag.no { background: #f0f2f5; color: #778; }
+.carry-tag { display: inline-block; background: #e8f0fe; color: #245bcc; border-radius: 8px; padding: 1px 8px; font-size: 11px; margin-top: 2px; }
+.reason-list { margin: 2px 0 0; padding-left: 16px; color: #a33224; }
+.reason-list li { margin: 1px 0; }
 .muted { color: #788; font-size: 12px; }
 .reg-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .reg-actions input[type="time"] { width: 92px; padding: 5px 8px; }

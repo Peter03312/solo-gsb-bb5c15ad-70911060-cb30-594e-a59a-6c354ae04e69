@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS registrations (
   row_ver        INTEGER NOT NULL DEFAULT 1,
   updated_by     TEXT,
   updated_at     TEXT,
+  carry_source_version INTEGER,             -- 非空：实际时间交接自哪个旧版本
+  carry_source_cue_ref  INTEGER,            -- 交接来源旧版中的提示项引用（cue_ref）
   UNIQUE(version_id, cue_ref)
 );
 
@@ -110,6 +112,12 @@ CREATE INDEX IF NOT EXISTS idx_pcues_version ON published_cues(version_id);
 CREATE INDEX IF NOT EXISTS idx_reg_version ON registrations(version_id);
 CREATE INDEX IF NOT EXISTS idx_corr_version ON registration_corrections(version_id);
 `);
+
+// 旧库迁移：为已存在的 registrations 补齐交接来源列（幂等）
+for (const col of ['carry_source_version', 'carry_source_cue_ref']) {
+  const exists = db.prepare("SELECT 1 FROM pragma_table_info('registrations') WHERE name = ?").get(col);
+  if (!exists) db.exec(`ALTER TABLE registrations ADD COLUMN ${col} INTEGER`);
+}
 
 function getMeta(key, fallback = null) {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);

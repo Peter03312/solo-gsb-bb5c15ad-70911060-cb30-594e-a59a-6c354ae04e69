@@ -226,6 +226,8 @@ function computeLive(publishedCues, deps, regMap) {
       rowVer: r.rowVer ?? 1,
       updatedBy: r.updatedBy ?? null,
       updatedAt: r.updatedAt ?? null,
+      carrySourceVersion: r.carrySourceVersion ?? null,
+      carrySourceCueRef: r.carrySourceCueRef ?? null,
     });
   }
 

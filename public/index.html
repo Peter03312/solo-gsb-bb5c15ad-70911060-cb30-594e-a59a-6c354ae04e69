@@ -100,6 +100,19 @@
             仅当「前置项计划结束不晚于后项开始、同岗位时段不重叠、依赖无环」全部满足时才能发布。
             发布后岗位在现场页依据版本登记，草稿仍可继续编辑。
           </p>
+
+          <div class="handover-box">
+            <div class="handover-head">
+              <div>
+                <strong>交接旧版已完成登记</strong>
+                <span class="muted" id="handover-summary">可先预览旧执行版中已完成项的交接资格，并勾选要带入新版的项。</span>
+              </div>
+              <button id="handover-preview-btn" class="ghost tiny" type="button">预览交接资格</button>
+            </div>
+            <div id="handover-stale" class="handover-stale" hidden></div>
+            <div id="handover-list"></div>
+          </div>
+
           <div class="publish-row">
             <input id="publish-note" placeholder="版本说明（可选），如：10 月 5 日联排" />
             <button id="publish-btn" class="danger">发布联排版本</button>
