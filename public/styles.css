@@ -82,6 +82,20 @@ tr:hover td { background: #fafbfd; }
 .publish-row input { flex: 1; }
 .publish-ok { margin-top: 12px; padding: 10px 14px; background: #e9f8ef; border: 1px solid #b6e2c6; border-radius: 8px; color: #1d7a43; font-size: 13px; }
 .muted { color: #788; font-size: 12px; }
+
+/* 发布前：旧执行版登记交接 */
+.handover-box { border: 1px solid #d3d9e2; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; background: #fafbfd; }
+.handover-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px; }
+.handover-body { font-size: 13px; }
+.ho-meta { margin-bottom: 8px; font-size: 13px; }
+.ho-table-wrap { margin: 6px 0 8px; }
+.ho-table-wrap td, .ho-table-wrap th { font-size: 12px; vertical-align: top; }
+tr.ho-eligible td { background: #f4faf6; }
+tr.ho-ineligible td { background: #fdf7f6; }
+.ho-reasons { margin: 0; padding-left: 16px; color: #a33224; }
+.ho-reasons li { margin: 2px 0; white-space: normal; }
+.ho-stale { color: #c0392b; }
+.handover-tag { display: inline-block; margin-top: 2px; font-size: 11px; color: #1d6f52; background: #e2f5ee; border-radius: 6px; padding: 0 6px; white-space: nowrap; }
 .reg-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .reg-actions input[type="time"] { width: 92px; padding: 5px 8px; }
 .own-row td { background: #f3f8ff; }

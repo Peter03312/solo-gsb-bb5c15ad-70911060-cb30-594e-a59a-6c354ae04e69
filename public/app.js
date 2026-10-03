@@ -8,6 +8,8 @@ const state = {
   versions: [],
   detail: null,
   editingCueId: null,
+  handover: null,
+  handoverLoading: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -58,6 +60,9 @@ function errorToHtml(err) {
   let html = `<strong>${esc(err.message)}</strong>`;
   if (d.errors?.length) {
     html += '<ul>' + d.errors.map((e) => `<li>[${esc(e.type)}] ${esc(e.message)}</li>`).join('') + '</ul>';
+  }
+  if (Array.isArray(d.items) && d.items.length) {
+    html += '<ul>' + d.items.map((it) => `<li>${esc(it.code || ('引用#' + it.cueRef))}：${esc(it.reason)}</li>`).join('') + '</ul>';
   }
   if (d.currentVersion !== undefined) html += `<div class="muted">请刷新草稿获取最新数据后再提交。</div>`;
   return html;
@@ -127,10 +132,82 @@ async function loadDraft() {
   state.draft = await api('GET', '/api/draft');
   state.positions = state.draft.positions;
   renderDraft();
+  loadHandover().catch((e) => {
+    state.handover = null;
+    renderHandover(`<span class="muted">交接预览加载失败：${esc(e.message)}</span>`);
+  });
 }
 
 async function loadDraftFresh() {
   return api('GET', '/api/draft');
+}
+
+// ---------- 舞监：发布前交接预览 ----------
+
+async function loadHandover() {
+  state.handoverLoading = true;
+  try {
+    state.handover = await api('GET', '/api/publish/handover/preview');
+    renderHandover();
+  } finally {
+    state.handoverLoading = false;
+  }
+}
+
+function handoverRowHtml(it, eligible) {
+  const check = eligible
+    ? `<input type="checkbox" data-act="pick-handover" data-ref="${it.cueRef}" ${it.selected ? 'checked' : ''} />`
+    : '<span class="muted">不可选</span>';
+  const reason = eligible ? '' : `<ul class="ho-reasons">${
+    (it.reasons || []).map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`;
+  return `<tr class="${eligible ? 'ho-eligible' : 'ho-ineligible'}">
+    <td>${check}</td>
+    <td><strong>${esc(it.code)}</strong></td>
+    <td>${esc(it.title || '')}</td>
+    <td>${esc(it.position)}</td>
+    <td class="mono">${esc(it.actualStartText)} - ${esc(it.actualEndText)}</td>
+    <td class="mono">v${it.rowVer}</td>
+    <td>${reason || '<span class="muted">编号/说明/岗位/计划开始/时长/前置集合一致，且旧登记已完成</span>'}</td>
+  </tr>`;
+}
+
+function renderHandover(errorHtml) {
+  const box = $('#handover-body');
+  if (!box) return;
+  if (errorHtml) { box.innerHTML = errorHtml; return; }
+  const h = state.handover;
+  if (!h) { box.innerHTML = '<span class="muted">加载中…</span>'; return; }
+  if (!h.oldVersion) {
+    box.innerHTML = '<div class="muted">尚无旧执行版（首次发布），没有可交接的已完成登记。</div>';
+    return;
+  }
+  const stale = h.draftVersion !== state.draft?.version;
+  const total = h.eligible.length + h.ineligible.length;
+  const head = `
+    <div class="ho-meta">
+      旧执行版：<strong>第 ${h.oldVersion.versionNo} 版</strong> ${esc(h.oldVersion.note || '')}
+      <span class="muted">发布于 ${esc(h.oldVersion.createdAt)}</span>
+      ｜预览基于草稿 v${h.draftVersion}${stale ? '<strong class="ho-stale"> · 草稿已变化，请重新预览</strong>' : ''}
+      ｜已完成项 ${total} 项，可延续 ${h.eligible.length} 项
+    </div>`;
+  if (total === 0) {
+    box.innerHTML = head + '<div class="muted">旧执行版中没有同时具备实际开始与实际完成的提示项，无可交接登记。</div>';
+    return;
+  }
+  const eligibleRows = h.eligible.map((it) => handoverRowHtml(it, true)).join('');
+  const ineligibleRows = h.ineligible.map((it) => handoverRowHtml(it, false)).join('');
+  const allSelected = h.eligible.length > 0 && h.eligible.every((it) => it.selected);
+  box.innerHTML = `${head}
+    <div class="table-wrap ho-table-wrap">
+      <table>
+        <thead><tr>
+          <th><input type="checkbox" id="ho-select-all" title="全选/全不选可延续项" ${allSelected ? 'checked' : ''} /></th>
+          <th>编号</th><th>说明</th><th>岗位</th><th>旧版实际开始-完成</th><th>行版本</th><th>交接资格 / 不合格原因</th>
+        </tr></thead>
+        <tbody>${eligibleRows}${ineligibleRows}</tbody>
+      </table>
+    </div>
+    <div class="muted">勾选的项在发布时仅带入<strong>实际开始、实际完成</strong>（不带预计结束）；未选项保持空登记。延续而来的登记会在新版标明来源版本与提示项，旧版登记与更正历史仍可回看，已发布计划保持冻结。</div>`;
 }
 
 function cueLabel(c) {
@@ -309,26 +386,65 @@ $('#dep-list').addEventListener('click', async (ev) => {
   }
 });
 
+function selectedHandoverItems() {
+  return (state.handover?.eligible || []).filter((it) => it.selected)
+    .map((it) => ({ cueRef: it.cueRef, rowVersion: it.rowVersion }));
+}
+
+$('#handover-reload').addEventListener('click', () =>
+  loadHandover().then(() => alertBar('ok', '交接预览已刷新')).catch((e) => alertBar('error', errorToHtml(e))));
+
+$('#handover-box').addEventListener('change', (ev) => {
+  const cb = ev.target;
+  if (cb.id === 'ho-select-all') {
+    const checked = cb.checked;
+    for (const it of state.handover?.eligible || []) it.selected = checked;
+    $$('#handover-box input[data-act="pick-handover"]').forEach((box) => { box.checked = checked; });
+    return;
+  }
+  if (cb.dataset.act === 'pick-handover') {
+    const ref = Number(cb.dataset.ref);
+    const it = (state.handover?.eligible || []).find((x) => x.cueRef === ref);
+    if (it) it.selected = cb.checked;
+  }
+});
+
 $('#publish-btn').addEventListener('click', async () => {
   if (!state.draft) return;
   if (!state.draft.validation.ok) {
     alertBar('error', '当前草稿存在冲突项，请先根据上方红色提示修正后再发布。');
     return;
   }
-  if (!confirm('确认发布只读联排版本？发布后岗位将依据新版本登记。')) return;
+  const payload = {
+    version: state.draft.version,
+    note: $('#publish-note').value.trim(),
+  };
+  // 已加载过交接预览：携带 handover（即使无可选项也传，保持校验闭环；加载失败时不传，维持原发布行为）
+  if (state.handover && state.handover.oldVersion) {
+    if (state.handover.draftVersion !== state.draft.version) {
+      alertBar('error', '交接预览基于的草稿版本已过期，请点击「重新预览」后再发布。');
+      return;
+    }
+    payload.handover = {
+      oldVersionId: state.handover.oldVersion.id,
+      draftVersion: state.handover.draftVersion,
+      items: selectedHandoverItems(),
+    };
+  }
+  const carried = payload.handover?.items.length || 0;
+  if (!confirm(`确认发布只读联排版本？${carried ? `将延续 ${carried} 项旧版已完成登记的实际开始 / 实际完成。` : '未选择交接项，新版登记均为空。'}发布后岗位将依据新版本登记。`)) return;
   try {
-    const result = await api('POST', '/api/publish', {
-      version: state.draft.version,
-      note: $('#publish-note').value.trim(),
-    });
+    const result = await api('POST', '/api/publish', payload);
     $('#publish-note').value = '';
-    alertBar('ok', `🎉 已发布联排第 ${result.versionNo} 版（版本号校验通过），草稿版本已推进，请刷新视图`);
+    const carriedMsg = result.handover?.carriedCount
+      ? `，已从第 ${result.handover.sourceVersionNo} 版延续 ${result.handover.carriedCount} 项实际开始/完成` : '';
+    alertBar('ok', `🎉 已发布联排第 ${result.versionNo} 版（版本号校验通过）${carriedMsg}，草稿版本已推进，请刷新视图`);
     state.draft = await loadDraftFresh();
     renderDraft();
   } catch (e) {
     if (e.status === 422) alertBar('error', errorToHtml(e), 12000);
     else alertBar('error', errorToHtml(e));
-    // 发布失败也拉取最新草稿（可能版本已变化）
+    // 发布失败（草稿/交接变化）后重新拉取草稿与交接预览
     loadDraft().then(renderDraft).catch(() => {});
   }
 });
@@ -399,12 +515,17 @@ function renderLive() {
       <td class="mono">${c.schedStartText}${delayed}</td>
       <td class="mono">${c.schedEndText}</td>
       <td>${statusBadge(c.status)}<div class="muted">v${c.rowVer}</div></td>
-      <td class="mono">${c.actualStartText ?? '—'}</td>
+      <td class="mono">${c.actualStartText ?? '—'}${handoverTag(c)}</td>
       <td class="mono">${c.actualEndText ?? '—'}</td>
       <td class="mono">${c.estimatedEndText ?? '—'}</td>
       <td>${reg}</td>
     </tr>`;
   }).join('');
+}
+
+function handoverTag(c) {
+  if (!c.handover) return '';
+  return `<div class="handover-tag" title="实际开始/完成延续自第 ${c.handover.sourceVersionNo} 版提示项 ${c.handover.sourceCode}">↩ 交接自第 ${c.handover.sourceVersionNo} 版·${esc(c.handover.sourceCode)}</div>`;
 }
 
 function renderRegControls(c) {
@@ -718,7 +839,7 @@ function renderDetail() {
         <td class="mono">${c.schedStartText}${c.delayed ? '<div class="delayed">顺延</div>' : ''}</td>
         <td class="mono">${c.schedEndText}</td>
         <td>${statusBadge(c.status)}</td>
-        <td class="mono">${c.actualStartText ?? '—'}</td>
+        <td class="mono">${c.actualStartText ?? '—'}${handoverTag(c)}</td>
         <td class="mono">${c.actualEndText ?? '—'}</td>
         <td class="mono">${c.estimatedEndText ?? '—'}</td>
         <td class="muted">${c.updatedBy ? esc(c.updatedBy) + '<br>' + esc(c.updatedAt || '') : '—'}</td>

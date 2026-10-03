@@ -78,6 +78,21 @@ npm start
    - 失败时明确列出每一项冲突（冲突双方、岗位、时间、环路径）；
 4. 点击「发布联排版本」生成只读版本，现场随即以该版本为准；草稿可继续修改并发布新版本。
 
+#### 发布新版前：旧执行版已完成登记交接（本轮新增）
+
+发布面板的「旧执行版登记交接」区会在**发布前自动预览**（也可点击「重新预览」），对照**当前草稿与旧执行版（最新已发布版本）**逐条列出旧版中**已完成**提示项（旧登记同时有实际开始与实际完成）的交接资格：
+
+- **可选条件（同时满足）**：草稿与旧版**同一提示项引用**（即草稿提示项 id）的**编号、说明、岗位、计划开始、时长、前置集合**六项完全一致，且旧登记**同时有实际开始和实际完成**；
+- 不满足的项列入「不可选」，逐项注明不合格原因（如「计划开始不一致（旧版 19:12 → 草稿 19:13）」），复选框禁用；
+- **无旧版（首次发布）或旧版无已完成项时，列表为空**，不影响正常发布。
+
+舞监勾选要延续的项后点「发布联排版本」：
+
+- 确认发布时服务器在**同一事务内重新核对**：①草稿版本号、②旧执行版（必须仍是当前执行版）、③每个所选登记行的**行版本号**、④资格是否仍成立；任一变化或资格失效则**整体拒绝**（HTTP 409 `HANDOVER_STALE`，响应逐项列出原因），不会产生新版本，请**重新预览**后再发布；
+- 成功后**仅将所选项的实际开始、实际完成带入新版**（不延续预计结束、不复制更正历史），**未选项保持空登记**；新版对应行标注「↩ 交接自第 N 版·编号」标明来源版本与提示项；
+- **旧版登记与更正历史原样保留、继续可回看**（「发布版本」页回看，含来源标注与更正记录）；已发布计划仍然冻结，交接只影响新版的现场登记初值；
+- 未传 `handover` 字段的发布请求**完全维持原行为**（新版全部空登记）；计划冲突仍然阻止发布（422）。
+
 #### 舞监现场更正（仅当前执行版本）
 
 舞监在「现场联排」页可对任一行登记进行**更正**（点击该行「更正」按钮）：
@@ -162,8 +177,107 @@ SESSION_SECRET=your-long-random-secret
 | GET | `/api/draft` | 舞监 | 草稿（含实时校验结果） |
 | POST/PUT/DELETE | `/api/draft/cues[/:id]` | 舞监 | 提示项增改删（校验草稿版本号/行版本号） |
 | POST/DELETE | `/api/draft/deps[/:id]` | 舞监 | 前置关系增删（校验草稿版本号） |
-| POST | `/api/publish` | 舞监 | 发布只读版本；冲突返回 422 并列出冲突项 |
+| GET | `/api/publish/handover/preview` | 舞监 | **发布前交接预览**：旧执行版已完成项的交接资格、不合格原因、旧登记行版本；无旧版时列表为空 |
+| POST | `/api/publish` | 舞监 | 发布只读版本；冲突返回 422 并列出冲突项；可带 `handover` 交接选择，资格/版本失效返回 409 `HANDOVER_STALE` |
 | GET | `/api/live` | 已登录 | 当前最新版本的现场重算结果（含每行更正历史 `corrections`） |
 | POST | `/api/registrations` | 执行岗位 | start / complete / estimate（校验行版本号、岗位归属、版本最新） |
 | POST | `/api/registrations/corrections` | 舞监 | 更正/清除单个登记字段（校验行版本号、仅当前执行版本；级联清除与一致性校验；原子写入更正历史） |
 | GET | `/api/versions` `/api/versions/:id` | 已登录 | 版本列表与历史回看（回看含每行更正历史） |
+
+## 八、登记交接 API 调用示例
+
+以本地默认端口 3000、舞监账号为例（`curl -c/-b` 复用会话 Cookie）：
+
+### 1. 登录并预览交接资格
+
+```bash
+# 登录（保存会话 Cookie）
+curl -c sm.cookie -s -X POST http://localhost:3000/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"sm","password":"sm12345"}'
+
+# 发布前预览：返回草稿版本、旧执行版、可选 / 不可选清单
+curl -b sm.cookie -s http://localhost:3000/api/publish/handover/preview
+```
+
+响应示例（旧版中 L1、S1 已完成且与草稿完全一致；S2 已完成但草稿计划开始被改过）：
+
+```json
+{
+  "draftVersion": 1,
+  "oldVersion": { "id": 1, "versionNo": 1, "note": "首版", "createdAt": "2026-10-03 19:40:00" },
+  "eligible": [
+    { "cueRef": 1, "code": "L1", "title": "开场灯光就位", "position": "灯光",
+      "actualStartText": "19:00", "actualEndText": "19:06", "rowVersion": 3, "selected": true },
+    { "cueRef": 2, "code": "S1", "title": "开场音乐", "position": "音响",
+      "actualStartText": "19:05", "actualEndText": "19:08", "rowVersion": 3, "selected": true }
+  ],
+  "ineligible": [
+    { "cueRef": 5, "code": "S2", "title": "风声效果", "position": "音响",
+      "actualStartText": "19:12", "actualEndText": "19:17", "rowVersion": 3,
+      "reasons": ["计划开始不一致（旧版 19:12 → 草稿 19:13）"],
+      "diffs": [{ "field": "plannedStart", "label": "计划开始", "oldText": "19:12", "newText": "19:13",
+                  "reason": "计划开始不一致：旧版为 19:12，草稿为 19:13" }] }
+  ]
+}
+```
+
+- 首次发布（无旧版）时 `oldVersion` 为 `null`，`eligible` / `ineligible` 均为 `[]`；
+- 仅「旧登记同时有实际开始和实际完成」的项会出现（只开始未完成的项不在列表中）。
+
+### 2. 携带交接选择发布
+
+```bash
+curl -b sm.cookie -s -X POST http://localhost:3000/api/publish \
+  -H 'Content-Type: application/json' -d '{
+    "version": 1,
+    "note": "第二场联排",
+    "handover": {
+      "oldVersionId": 1,
+      "draftVersion": 1,
+      "items": [
+        { "cueRef": 1, "rowVersion": 3 },
+        { "cueRef": 2, "rowVersion": 3 }
+      ]
+    }
+  }'
+```
+
+- `version`：沿用现有发布请求的**草稿版本号**校验（不一致返回 409 `VERSION_CONFLICT`）；
+- `handover.oldVersionId` / `draftVersion` / `items[].rowVersion` 均取自上一步预览；
+- `items` 只放要延续的项；为空数组 `[]` 表示一项都不延续（仍会核对预览基于的草稿版本与旧版）；
+- **不传 `handover` 字段时完全维持原有发布行为**（新版全部空登记）。
+
+成功响应沿用原发布返回（新版本完整负载），并追加 `handover` 汇总；每个被延续的提示项负载中带有 `handover` 来源标注：
+
+```json
+{
+  "id": 2, "versionNo": 2, "note": "第二场联排",
+  "cues": [
+    { "code": "L1", "status": "DONE", "actualStartText": "19:00", "actualEndText": "19:06",
+      "estimatedEndText": null,
+      "handover": { "sourceVersionId": 1, "sourceVersionNo": 1, "sourceCueRef": 1, "sourceCode": "L1" } }
+  ],
+  "handover": { "carriedCount": 2, "sourceVersionId": 1, "sourceVersionNo": 1 }
+}
+```
+
+### 3. 资格 / 版本失效被整体拒绝
+
+预览之后若草稿又被编辑、旧版被新版替代、或岗位/舞监对所选登记行又有提交（行版本推进），发布整体拒绝（不产生任何新版本、不写部分登记）：
+
+```json
+HTTP 409
+{
+  "error": "HANDOVER_STALE",
+  "message": "交接资格核对未通过（1 项），本次发布已整体拒绝，请重新预览后再选择发布",
+  "items": [
+    { "cueRef": 1, "code": "L1",
+      "reason": "「L1」旧登记行版本已变化（预览时 v3，当前 v4，可能被岗位登记或舞监更正更新），请重新预览后再发布",
+      "currentRowVersion": 4 }
+  ]
+}
+```
+
+其余既有行为不变：计划冲突仍返回 **422 `PUBLISH_CONFLICT`** 并列出冲突项；草稿版本号过期返回 **409 `VERSION_CONFLICT`**。页面上的勾选与上述 API 完全等价：草稿编辑页发布面板内完成「预览 → 勾选 → 发布」，现场页与版本回看页均可看到延续项的来源标注，旧版登记与更正历史保持可回看。
+
